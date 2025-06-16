@@ -111,38 +111,37 @@ func (g *KeyWord) Contain(text string) bool {
 var (
 	defaultDataType             = "string"
 	dataType        dataTypeMap = map[string]dataTypeMapping{
-		"numeric":          func(string) string { return "int" },
-		"integer":          func(string) string { return "int" },
-		"int":              func(string) string { return "int" },
-		"smallint":         func(string) string { return "int" },
-		"mediumint":        func(string) string { return "int" },
-		"bigint":           func(string) string { return "int64" },
-		"float":            func(string) string { return "float32" },
-		"real":             func(string) string { return "float64" },
-		"double":           func(string) string { return "float64" },
-		"decimal":          func(string) string { return "float64" },
-		"char":             func(string) string { return "string" },
-		"varchar":          func(string) string { return "string" },
-		"tinytext":         func(string) string { return "string" },
-		"mediumtext":       func(string) string { return "string" },
-		"longtext":         func(string) string { return "string" },
-		"binary":           func(string) string { return "[]byte" },
-		"varbinary":        func(string) string { return "[]byte" },
-		"tinyblob":         func(string) string { return "[]byte" },
-		"blob":             func(string) string { return "[]byte" },
-		"mediumblob":       func(string) string { return "[]byte" },
-		"longblob":         func(string) string { return "[]byte" },
-		"text":             func(string) string { return "string" },
-		"json":             func(string) string { return "string" },
-		"enum":             func(string) string { return "string" },
-		"time":             func(string) string { return "time.Time" },
-		"date":             func(string) string { return "time.Time" },
-		"datetime":         func(string) string { return "time.Time" },
-		"timestamp":        func(string) string { return "time.Time" },
-		"uniqueidentifier": func(string) string { return "uuid.UUID" },
-		"year":             func(string) string { return "int" },
-		"bit":              func(string) string { return "bool" },
-		"boolean":          func(string) string { return "bool" },
+		"numeric":    func(string) string { return "int32" },
+		"integer":    func(string) string { return "int32" },
+		"int":        func(string) string { return "int32" },
+		"smallint":   func(string) string { return "int32" },
+		"mediumint":  func(string) string { return "int32" },
+		"bigint":     func(string) string { return "int64" },
+		"float":      func(string) string { return "float32" },
+		"real":       func(string) string { return "float64" },
+		"double":     func(string) string { return "float64" },
+		"decimal":    func(string) string { return "float64" },
+		"char":       func(string) string { return "string" },
+		"varchar":    func(string) string { return "string" },
+		"tinytext":   func(string) string { return "string" },
+		"mediumtext": func(string) string { return "string" },
+		"longtext":   func(string) string { return "string" },
+		"binary":     func(string) string { return "[]byte" },
+		"varbinary":  func(string) string { return "[]byte" },
+		"tinyblob":   func(string) string { return "[]byte" },
+		"blob":       func(string) string { return "[]byte" },
+		"mediumblob": func(string) string { return "[]byte" },
+		"longblob":   func(string) string { return "[]byte" },
+		"text":       func(string) string { return "string" },
+		"json":       func(string) string { return "string" },
+		"enum":       func(string) string { return "string" },
+		"time":       func(string) string { return "time.Time" },
+		"date":       func(string) string { return "time.Time" },
+		"datetime":   func(string) string { return "time.Time" },
+		"timestamp":  func(string) string { return "time.Time" },
+		"year":       func(string) string { return "int32" },
+		"bit":        func(string) string { return "[]uint8" },
+		"boolean":    func(string) string { return "bool" },
 		"tinyint": func(detailType string) string {
 			if strings.HasPrefix(strings.TrimSpace(detailType), "tinyint(1)") {
 				return "bool"
@@ -163,9 +162,28 @@ func (m dataTypeMap) Get(dataType, detailType string) string {
 	return defaultDataType
 }
 
-// Gets the code Type for the sqlDataType.
+// GetDataType returns the corresponding Go data type for a given SQL data type string.
+// It uses the dataType mapping to look up the Go type associated with the provided SQL data type.
+// If the SQL data type is not found in the mapping, it returns an empty string.
+//
+// Parameters:
+//   - sqlDataType: the SQL data type as a string.
+//
+// Returns:
+//   - The Go data type as a string, or an empty string if not found.
 func GetDataType(sqlDataType string) string {
 	return dataType.Get(sqlDataType, "")
+}
+
+// SetDataType registers a mapping function for a specific database type.
+// It associates the provided dbType string with the getTypeFunc, which defines
+// how to map the database type to the application's data type.
+//
+// Parameters:
+//   - dbType: the name of the database type to map.
+//   - getTypeFunc: a function that returns the application's data type for the given dbType.
+func SetDataType(dbType string, getTypeFunc dataTypeMapping) {
+	dataType[dbType] = getTypeFunc
 }
 
 // Field user input structures
