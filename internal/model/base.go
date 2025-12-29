@@ -197,6 +197,8 @@ type Field struct {
 	GORMTag          field.GormTag
 	CustomGenType    string
 	Relation         *field.Relation
+
+	Column *Column
 }
 
 // Tags ...
