@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 
 	"golang.org/x/tools/go/packages"
@@ -94,8 +96,8 @@ type Logger interface {
 // Generator code generator
 type Generator struct {
 	Config
-	Data   map[string]*genInfo                  //gen query data
-	models map[string]*generate.QueryStructMeta //gen model data
+	Data   map[string]*genInfo                  // gen query data
+	models map[string]*generate.QueryStructMeta // gen model data
 
 	logger Logger
 }
@@ -190,11 +192,12 @@ func (g *Generator) genModelConfig(tableName string, modelName string, modelOpts
 			DataTypeMap:   g.dataTypeMap,
 			ColumnTypeMap: g.columnTypeMap,
 
-			FieldSignable:     g.FieldSignable,
-			FieldNullable:     g.FieldNullable,
-			FieldCoverable:    g.FieldCoverable,
-			FieldWithIndexTag: g.FieldWithIndexTag,
-			FieldWithTypeTag:  g.FieldWithTypeTag,
+			FieldSignable:       g.FieldSignable,
+			FieldNullable:       g.FieldNullable,
+			FieldCoverable:      g.FieldCoverable,
+			FieldWithIndexTag:   g.FieldWithIndexTag,
+			FieldWithTypeTag:    g.FieldWithTypeTag,
+			FieldWithDefaultTag: g.FieldWithDefaultTag,
 
 			FieldJSONTagNS: g.fieldJSONTagNS,
 		},
@@ -306,30 +309,65 @@ func (g *Generator) generateQueryFile() (err error) {
 		return fmt.Errorf("make dir outpath(%s) fail: %s", g.OutPath, err)
 	}
 
-	errChan := make(chan error)
+	manifestEnabled := g.Incremental || g.MergeQuery
+	var manifest *genManifest
+	var manifestPath string
+	var manifestMu sync.Mutex
+	if manifestEnabled {
+		manifest, manifestPath, err = loadManifest(g.OutPath)
+		if err != nil {
+			return err
+		}
+		prevMode := manifest.Mode
+		if g.MergeQuery && prevMode != 0 && prevMode != uint(g.Mode) {
+			return fmt.Errorf("cannot merge query tables with different mode: previous=%d current=%d", prevMode, g.Mode)
+		}
+		manifest.Mode = uint(g.Mode)
+	}
+
+	errs := newAbortGroup()
 	pool := pools.NewPool(concurrent)
-	// generate query code for all struct
+	// generate query code for all struct, stopping as soon as any table fails
+queryLoop:
 	for _, info := range g.Data {
+		select {
+		case <-errs.Aborted(): // stop scheduling further tables
+			break queryLoop
+		default:
+		}
 		pool.Wait()
 		go func(info *genInfo) {
 			defer pool.Done()
-			err := g.generateSingleQueryFile(info)
-			if err != nil {
-				errChan <- err
+			select {
+			case <-errs.Aborted(): // a sibling already failed; skip wasted work
+				return
+			default:
+			}
+
+			if err := g.generateSingleQueryFile(info, manifest, &manifestMu); err != nil {
+				errs.Abort(err)
+				return
 			}
 
 			if g.WithUnitTest {
-				err = g.generateQueryUnitTestFile(info)
-				if err != nil { // do not panic
+				if err := g.generateQueryUnitTestFile(info, manifest, &manifestMu); err != nil { // do not panic
 					g.db.Logger.Error(context.Background(), "generate unit test fail: %s", err)
+					return
 				}
 			}
 		}(info)
 	}
-	select {
-	case err = <-errChan:
+	// wait for in-flight workers to wind down before draining the failure
+	<-pool.AsyncWaitAll()
+	if err := errs.Err(); err != nil {
 		return err
-	case <-pool.AsyncWaitAll():
+	}
+
+	genForRoot := *g
+	if g.MergeQuery {
+		mergedTables, dataForGenGo := g.buildMergedQueryData(manifest)
+		manifest.Tables = mergedTables
+		genForRoot.Data = dataForGenGo
 	}
 
 	// generate query file
@@ -343,17 +381,21 @@ func (g *Generator) generateQueryFile() (err error) {
 	}
 
 	if g.judgeMode(WithDefaultQuery) {
-		err = render(tmpl.DefaultQuery, &buf, g)
+		err = render(tmpl.DefaultQuery, &buf, &genForRoot)
 		if err != nil {
 			return err
 		}
 	}
-	err = render(tmpl.QueryMethod, &buf, g)
+	err = render(tmpl.QueryMethod, &buf, &genForRoot)
 	if err != nil {
 		return err
 	}
 
-	err = g.output(g.OutFile, buf.Bytes())
+	if manifestEnabled {
+		err = g.outputWithManifest(g.OutFile, buf.Bytes(), manifest, filepath.Base(g.OutFile), &manifestMu)
+	} else {
+		err = g.output(g.OutFile, buf.Bytes())
+	}
 	if err != nil {
 		return err
 	}
@@ -375,13 +417,17 @@ func (g *Generator) generateQueryFile() (err error) {
 		if err != nil {
 			return err
 		}
-		err = render(tmpl.QueryMethodTest, &buf, g)
+		err = render(tmpl.QueryMethodTest, &buf, &genForRoot)
 		if err != nil {
 			g.db.Logger.Error(context.Background(), "generate query unit test fail: %s", err)
 			return nil
 		}
 		fileName := strings.TrimSuffix(g.OutFile, ".go") + "_test.go"
-		err = g.output(fileName, buf.Bytes())
+		if manifestEnabled {
+			err = g.outputWithManifest(fileName, buf.Bytes(), manifest, filepath.Base(fileName), &manifestMu)
+		} else {
+			err = g.output(fileName, buf.Bytes())
+		}
 		if err != nil {
 			g.db.Logger.Error(context.Background(), "generate query unit test fail: %s", err)
 			return nil
@@ -389,11 +435,66 @@ func (g *Generator) generateQueryFile() (err error) {
 		g.info("generate unit test file: " + fileName)
 	}
 
+	if manifestEnabled {
+		if err := saveManifest(manifestPath, manifest); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+func (g *Generator) buildMergedQueryData(manifest *genManifest) (map[string]genManifestTable, map[string]*genInfo) {
+	currentTables := make(map[string]genManifestTable, len(g.Data))
+	for _, d := range g.Data {
+		currentTables[d.ModelStructName] = genManifestTable{
+			ModelStructName: d.ModelStructName,
+			QueryStructName: d.QueryStructName,
+			FileName:        d.FileName,
+		}
+	}
+
+	mergedTables := currentTables
+	if g.MergeQuery {
+		mergedTables = make(map[string]genManifestTable, len(manifest.Tables)+len(currentTables))
+		for k, v := range manifest.Tables {
+			mergedTables[k] = v
+		}
+		for k, v := range currentTables {
+			mergedTables[k] = v
+		}
+		for k, v := range mergedTables {
+			if _, err := os.Stat(filepath.Join(g.OutPath, v.FileName+".gen.go")); err != nil && errors.Is(err, os.ErrNotExist) {
+				if _, ok := currentTables[k]; !ok {
+					delete(mergedTables, k)
+				}
+			}
+		}
+	}
+
+	dataForGenGo := g.Data
+	if g.MergeQuery {
+		dataForGenGo = make(map[string]*genInfo, len(mergedTables))
+		for k, v := range g.Data {
+			dataForGenGo[k] = v
+		}
+		for k, v := range mergedTables {
+			if _, ok := dataForGenGo[k]; ok {
+				continue
+			}
+			meta := (&generate.QueryStructMeta{
+				ModelStructName: v.ModelStructName,
+				QueryStructName: v.QueryStructName,
+				FileName:        v.FileName,
+			}).IfaceMode(g.judgeMode(WithQueryInterface) || g.judgeMode(WithGeneric)).GenericMode(g.judgeMode(WithGeneric))
+			dataForGenGo[k] = &genInfo{QueryStructMeta: meta}
+		}
+	}
+
+	return mergedTables, dataForGenGo
+}
+
 // generateSingleQueryFile generate query code and save to file
-func (g *Generator) generateSingleQueryFile(data *genInfo) (err error) {
+func (g *Generator) generateSingleQueryFile(data *genInfo, m *genManifest, mu *sync.Mutex) (err error) {
 	var buf bytes.Buffer
 
 	structPkgPath := data.StructInfo.PkgPath
@@ -456,11 +557,15 @@ func (g *Generator) generateSingleQueryFile(data *genInfo) (err error) {
 	}
 
 	defer g.info(fmt.Sprintf("generate query file: %s%s%s.gen.go", g.OutPath, string(os.PathSeparator), data.FileName))
-	return g.output(fmt.Sprintf("%s%s%s.gen.go", g.OutPath, string(os.PathSeparator), data.FileName), buf.Bytes())
+	fileName := fmt.Sprintf("%s%s%s.gen.go", g.OutPath, string(os.PathSeparator), data.FileName)
+	if m == nil {
+		return g.output(fileName, buf.Bytes())
+	}
+	return g.outputWithManifest(fileName, buf.Bytes(), m, filepath.Base(fileName), mu)
 }
 
 // generateQueryUnitTestFile generate unit test file for query
-func (g *Generator) generateQueryUnitTestFile(data *genInfo) (err error) {
+func (g *Generator) generateQueryUnitTestFile(data *genInfo, m *genManifest, mu *sync.Mutex) (err error) {
 	var buf bytes.Buffer
 
 	structPkgPath := data.StructInfo.PkgPath
@@ -475,7 +580,15 @@ func (g *Generator) generateQueryUnitTestFile(data *genInfo) (err error) {
 		return err
 	}
 
-	err = render(tmpl.CRUDMethodTest, &buf, data.QueryStructMeta)
+	crudTmpl := tmpl.CRUDMethodTest
+	if g.UnitTestTemplate != "" {
+		content, readErr := os.ReadFile(g.UnitTestTemplate)
+		if readErr != nil {
+			return readErr
+		}
+		crudTmpl = string(content)
+	}
+	err = render(crudTmpl, &buf, data.QueryStructMeta)
 	if err != nil {
 		return err
 	}
@@ -488,7 +601,11 @@ func (g *Generator) generateQueryUnitTestFile(data *genInfo) (err error) {
 	}
 
 	defer g.info(fmt.Sprintf("generate unit test file: %s%s%s.gen_test.go", g.OutPath, string(os.PathSeparator), data.FileName))
-	return g.output(fmt.Sprintf("%s%s%s.gen_test.go", g.OutPath, string(os.PathSeparator), data.FileName), buf.Bytes())
+	fileName := fmt.Sprintf("%s%s%s.gen_test.go", g.OutPath, string(os.PathSeparator), data.FileName)
+	if m == nil {
+		return g.output(fileName, buf.Bytes())
+	}
+	return g.outputWithManifest(fileName, buf.Bytes(), m, filepath.Base(fileName), mu)
 }
 
 // generateModelFile generate model structures and save to file
@@ -506,47 +623,79 @@ func (g *Generator) generateModelFile() error {
 		return fmt.Errorf("create model pkg path(%s) fail: %s", modelOutPath, err)
 	}
 
-	errChan := make(chan error)
+	manifestEnabled := g.Incremental
+	var manifest *genManifest
+	var manifestPath string
+	var manifestMu sync.Mutex
+	if manifestEnabled {
+		manifest, manifestPath, err = loadManifest(modelOutPath)
+		if err != nil {
+			return err
+		}
+		manifest.Mode = uint(g.Mode)
+	}
+
+	errs := newAbortGroup()
 	pool := pools.NewPool(concurrent)
+modelLoop:
 	for _, data := range g.models {
 		if data == nil || !data.Generated {
 			continue
 		}
+		select {
+		case <-errs.Aborted(): // stop scheduling further tables
+			break modelLoop
+		default:
+		}
 		pool.Wait()
 		go func(data *generate.QueryStructMeta) {
 			defer pool.Done()
+			select {
+			case <-errs.Aborted(): // a sibling already failed; skip wasted work
+				return
+			default:
+			}
 
 			var buf bytes.Buffer
-			err := render(tmpl.Model, &buf, data)
-			if err != nil {
-				errChan <- err
+			if err := render(tmpl.Model, &buf, data); err != nil {
+				errs.Abort(err)
 				return
 			}
 
 			for _, method := range data.ModelMethods {
-				err = render(tmpl.ModelMethod, &buf, method)
-				if err != nil {
-					errChan <- err
+				if err := render(tmpl.ModelMethod, &buf, method); err != nil {
+					errs.Abort(err)
 					return
 				}
 			}
 
 			modelFile := modelOutPath + data.FileName + ".gen.go"
-			err = g.output(modelFile, buf.Bytes())
+			var err error
+			if manifestEnabled {
+				err = g.outputWithManifest(modelFile, buf.Bytes(), manifest, filepath.Base(modelFile), &manifestMu)
+			} else {
+				err = g.output(modelFile, buf.Bytes())
+			}
 			if err != nil {
-				errChan <- err
+				errs.Abort(err)
 				return
 			}
 
 			g.info(fmt.Sprintf("generate model file(table <%s> -> {%s.%s}): %s", data.TableName, data.StructInfo.Package, data.StructInfo.Type, modelFile))
 		}(data)
 	}
-	select {
-	case err = <-errChan:
+	// wait for in-flight workers to wind down before draining the failure
+	<-pool.AsyncWaitAll()
+	if err := errs.Err(); err != nil {
+		// the round failed; skip manifest persistence and pkg path detection
 		return err
-	case <-pool.AsyncWaitAll():
-		g.fillModelPkgPath(modelOutPath)
 	}
+	if manifestEnabled {
+		if err := saveManifest(manifestPath, manifest); err != nil {
+			return err
+		}
+	}
+	g.fillModelPkgPath(modelOutPath)
 	return nil
 }
 
@@ -578,26 +727,75 @@ func (g *Generator) fillModelPkgPath(filePath string) {
 	g.Config.modelPkgPath = pkgs[0].PkgPath
 }
 
+func (g *Generator) format(fileName string, content []byte) ([]byte, error) {
+	result, err := imports.Process(fileName, content, nil)
+	if err == nil {
+		if g.UseAny {
+			// Rewrite the empty interface onto its "any" alias as the last step,
+			// after gofmt normalization: the formatted text spells every empty
+			// interface exactly "interface{}", so a plain ReplaceAll cannot miss
+			// occurrences or touch non-empty interfaces like "interface{ M() }".
+			// Doing it here also lets the incremental manifest hash cover the
+			// final bytes. Literal "interface{}" inside comments and string
+			// literals is rewritten too.
+			result = []byte(strings.ReplaceAll(string(result), "interface{}", "any"))
+		}
+		return result, nil
+	}
+
+	lines := strings.Split(string(content), "\n")
+	errLine, _ := strconv.Atoi(strings.Split(err.Error(), ":")[1])
+	startLine, endLine := errLine-5, errLine+5
+	fmt.Println("Format fail:", errLine, err)
+	if startLine < 0 {
+		startLine = 0
+	}
+	if endLine > len(lines)-1 {
+		endLine = len(lines) - 1
+	}
+	for i := startLine; i <= endLine; i++ {
+		fmt.Println(i, lines[i])
+	}
+	return nil, fmt.Errorf("cannot format file: %w", err)
+}
+
 // output format and output
 func (g *Generator) output(fileName string, content []byte) error {
-	result, err := imports.Process(fileName, content, nil)
+	result, err := g.format(fileName, content)
 	if err != nil {
-		lines := strings.Split(string(content), "\n")
-		errLine, _ := strconv.Atoi(strings.Split(err.Error(), ":")[1])
-		startLine, endLine := errLine-5, errLine+5
-		fmt.Println("Format fail:", errLine, err)
-		if startLine < 0 {
-			startLine = 0
-		}
-		if endLine > len(lines)-1 {
-			endLine = len(lines) - 1
-		}
-		for i := startLine; i <= endLine; i++ {
-			fmt.Println(i, lines[i])
-		}
-		return fmt.Errorf("cannot format file: %w", err)
+		return err
 	}
 	return os.WriteFile(fileName, result, 0640)
+}
+
+func (g *Generator) outputWithManifest(fileName string, content []byte, m *genManifest, key string, mu *sync.Mutex) error {
+	result, err := g.format(fileName, content)
+	if err != nil {
+		return err
+	}
+
+	hash := sha256Hex(result)
+	if g.Incremental {
+		mu.Lock()
+		old := m.Files[key]
+		mu.Unlock()
+		if old == hash {
+			if _, err := os.Stat(fileName); err == nil {
+				return nil
+			}
+		}
+	} else {
+		// always write
+	}
+
+	if err := os.WriteFile(fileName, result, 0640); err != nil {
+		return err
+	}
+
+	mu.Lock()
+	m.Files[key] = hash
+	mu.Unlock()
+	return nil
 }
 
 func (g *Generator) pushQueryStructMeta(meta *generate.QueryStructMeta) (*genInfo, error) {

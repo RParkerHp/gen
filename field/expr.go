@@ -36,6 +36,8 @@ type Expr interface {
 	MulCol(col Expr) Expr
 	DivCol(col Expr) Expr
 	ConcatCol(cols ...Expr) Expr
+	Desc() Expr
+	Asc() Expr
 
 	// implement Condition
 	BeCond() interface{}
@@ -54,6 +56,7 @@ type OrderExpr interface {
 
 type expression interface{}
 
+// IColumnName exposes the unquoted column name carried by a field expression.
 type IColumnName interface {
 	ColumnName() sql
 }
@@ -136,9 +139,10 @@ func (e expr) BuildWithArgs(stmt *gorm.Statement) (sql, []interface{}) {
 	if e.e == nil {
 		return sql(e.BuildColumn(stmt, WithAll)), nil
 	}
-	newStmt := &gorm.Statement{DB: stmt.DB, Table: stmt.Table, Schema: stmt.Schema}
+	offset := len(stmt.Vars)
+	newStmt := &gorm.Statement{DB: stmt.DB, Table: stmt.Table, Schema: stmt.Schema, Vars: make([]interface{}, offset)}
 	e.e.Build(newStmt)
-	return sql(newStmt.SQL.String()), newStmt.Vars
+	return sql(newStmt.SQL.String()), newStmt.Vars[offset:]
 }
 
 func (e expr) RawExpr() expression {

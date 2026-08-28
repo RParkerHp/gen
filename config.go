@@ -37,15 +37,22 @@ type Config struct {
 	OutFile      string // query code file name, default: gen.go
 	ModelPkgPath string // generated model code's package name
 	WithUnitTest bool   // generate unit test for query code
+	Incremental  bool   // skip writing unchanged generated files (based on manifest hash)
+	MergeQuery   bool   // keep previously generated query entries (A+B) when generating subsets
+	UseAny       bool   // emit "any" instead of "interface{}" in generated code (requires Go 1.18+ in the target module)
 
 	// generate model global configuration
-	FieldNullable     bool // generate pointer when field is nullable
-	FieldCoverable    bool // generate pointer when field has default value, to fix problem zero value cannot be assign: https://gorm.io/docs/create.html#Default-Values
-	FieldSignable     bool // detect integer field's unsigned type, adjust generated data type
-	FieldWithIndexTag bool // generate with gorm index tag
-	FieldWithTypeTag  bool // generate with gorm column type tag
+	FieldNullable       bool // generate pointer when field is nullable
+	FieldCoverable      bool // generate pointer when field has default value, to fix problem zero value cannot be assign: https://gorm.io/docs/create.html#Default-Values
+	FieldSignable       bool // detect integer field's unsigned type, adjust generated data type
+	FieldWithIndexTag   bool // generate with gorm index tag
+	FieldWithTypeTag    bool // generate with gorm column type tag
+	FieldWithDefaultTag bool // include database defaults in generated gorm tags
 
 	Mode GenerateMode // generate mode
+
+	// UnitTestTemplate is the path to a custom CRUD test template used when WithUnitTest is enabled.
+	UnitTestTemplate string
 
 	queryPkgName   string // generated query code's package name
 	modelPkgPath   string // model pkg path in target project

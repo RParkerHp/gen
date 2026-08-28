@@ -18,6 +18,7 @@ database:
   outFile :  ""
   # generate unit test for query code
   withUnitTest  : false
+  unitTestTemplate : ""
   # generated model code's package name
   modelPkgName  : ""
   # generate with pointer when field is nullable
@@ -28,5 +29,17 @@ database:
   fieldWithIndexTag : false
   # generate field with gorm column type tag
   fieldWithTypeTag  : false
+  # generate field with gorm default tag
+  fieldWithDefaultTag : false
   # detect integer field's unsigned type, adjust generated data type
   fieldSignable  : false
+  # create default query in generated code
+  withDefaultQuery: false
+  # generate code with generic
+  withGeneric: false
+  # generate code without context constrain
+  withoutContext: false
+  # generate code with exported interface object
+  withQueryInterface: false
+  # emit "any" instead of "interface{}" in generated code (requires Go 1.18+)
+  useAny: false
