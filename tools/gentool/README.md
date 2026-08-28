@@ -11,44 +11,59 @@ Install GEN as a binary tool
 ## usage
 
 ```shell
- 
- gentool -h  
- 
- Usage of gentool:
+gentool -h  
+
+Usage of gentool:
+  -c string
+        is path for gen.yml
   -db string
         input mysql|postgres|sqlite|sqlserver|clickhouse. consult[https://gorm.io/docs/connecting_to_the_database.html] (default "mysql")
   -dsn string
         consult[https://gorm.io/docs/connecting_to_the_database.html]
-  -fieldNullable
-        generate with pointer when field is nullable
   -fieldCoverable
         generate with pointer when field has default value
+  -fieldNullable
+        generate with pointer when field is nullable
+  -fieldSignable
+        detect integer field's unsigned type, adjust generated data type
   -fieldWithIndexTag
         generate field with gorm index tag
   -fieldWithTypeTag
         generate field with gorm column type tag
+  -fieldWithDefaultTag
+        generate field with gorm default tag
   -modelPkgName string
         generated model code's package name
+  -onlyModel
+        only generate models (without query file)
   -outFile string
         query code file name, default: gen.go
   -outPath string
         specify a directory for output (default "./dao/query")
   -tables string
         enter the required data table or leave it blank
-  -onlyModel
-        only generate models (without query file)
+  -useAny
+        emit "any" instead of "interface{}" in generated code (requires Go 1.18+)
+  -withDefaultQuery
+        create default query in generated code
+  -withGeneric
+        generate code with generic
+  -withQueryInterface
+        generate code with exported interface object
   -withUnitTest
         generate unit test for query code
-  -fieldSignable
-        detect integer field's unsigned type, adjust generated data type
-
+  -unitTestTemplate string
+        custom unit test template file path for query code
+  -withoutContext
+        generate code without context constrain
 ```
+
 #### c
+
 default ""
 Is path for gen.yml
 Replace the command line with a configuration file
 The command line is the highest priority
-
 
 #### db
 
@@ -79,6 +94,10 @@ generate field with gorm index tag
 #### fieldWithTypeTag
 
 generate field with gorm column type tag
+
+#### fieldWithDefaultTag
+
+generate field with gorm default tag
 
 #### modelPkgName
 
@@ -114,13 +133,45 @@ Value : False / True
 
 Generate unit test.
 
+#### unitTestTemplate
+
+custom unit test template file path for query code
+
 #### fieldSignable
 
 Value : False / True
 
 detect integer field's unsigned type, adjust generated data type
 
+#### withDefaultQuery
 
+Default: false
+
+create default query in generated code
+
+#### withGeneric
+
+Default: false
+
+generate code with generic
+
+#### withQueryInterface
+
+Default: false
+
+generate code with exported interface object
+
+#### useAny
+
+Default: false
+
+emit "any" instead of "interface{}" in generated code. Requires the target module to build with Go 1.18 or later. The literal text "interface{}" in comments and string literals is rewritten too.
+
+#### withoutContext
+
+Default: false
+
+generate code without context constrain
 
 ### example
 
