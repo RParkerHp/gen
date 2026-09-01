@@ -33,7 +33,8 @@ type NameStrategy struct {
 
 // FieldConfig field configuration
 type FieldConfig struct {
-	DataTypeMap map[string]func(columnType gorm.ColumnType) (dataType string) // overrides database-to-Go type mappings
+	DataTypeMap   map[string]func(columnType gorm.ColumnType) (dataType string)
+	ColumnTypeMap map[string]func(columnType gorm.ColumnType) (colType string)
 
 	FieldNullable       bool // generate pointer when field is nullable
 	FieldCoverable      bool // generate pointer when field has default value
@@ -42,7 +43,7 @@ type FieldConfig struct {
 	FieldWithTypeTag    bool // generate with gorm column type tag
 	FieldWithDefaultTag bool // includes database defaults in generated GORM tags
 
-	FieldJSONTagNS func(columnName string) string // maps database columns to JSON tag values
+	FieldJSONTagNS func(tableName, columnName string) string // maps database columns to JSON tag values
 
 	ModifyOpts []FieldOption // transforms existing fields after introspection
 	FilterOpts []FieldOption // removes existing fields after introspection

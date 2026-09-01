@@ -12,10 +12,10 @@ import (
 const manifestFileName = ".genmanifest.json"
 
 type genManifest struct {
-	Version int `json:"version"`
-	Mode    uint `json:"mode"`
+	Version int                         `json:"version"`
+	Mode    uint                        `json:"mode"`
 	Tables  map[string]genManifestTable `json:"tables,omitempty"`
-	Files   map[string]string          `json:"files,omitempty"`
+	Files   map[string]string           `json:"files,omitempty"`
 }
 
 type genManifestTable struct {

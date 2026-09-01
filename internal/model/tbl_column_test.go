@@ -186,7 +186,7 @@ func TestColumnDefaultAndCommentSanitization(t *testing.T) {
 		databaseType: "text",
 		comment:      "line1\n*/ line2: value; `quoted` \"text\"",
 	}}
-	column.WithNS(func(name string) string { return "json_" + name })
+	column.WithNS(func(tableName, columnName string) string { return "json_" + columnName })
 	got := column.ToField(false, false, false, false)
 	if !got.MultilineComment {
 		t.Fatal("expected multiline comment")
